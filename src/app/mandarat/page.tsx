@@ -62,6 +62,7 @@ function MandaratPageContent() {
   const [error, setError] = useState<string | null>(null)
   const [savedMessage, setSavedMessage] = useState(false)
   const [selectedCell, setSelectedCell] = useState<{ row: number; col: number } | null>(null)
+  const [editingCell, setEditingCell] = useState<{ row: number; col: number; value: string; cell: ChartCell } | null>(null)
   const [setupRequired, setSetupRequired] = useState(false)
   const [timeoutError, setTimeoutError] = useState(false)
   const initializedRef = useRef(false)
@@ -558,21 +559,38 @@ function MandaratPageContent() {
     setActions(newActions)
   }
 
-  // 셀 클릭 핸들러 (에디터 포커스)
+  // 셀 클릭 핸들러 (셀 내부 편집 모드)
   const handleCellClick = (cell: ChartCell) => {
+    if (cell.type === 'empty') return
+    
+    const content = getChartCellContent(cell)
+    setEditingCell({ row: cell.row, col: cell.col, value: content, cell })
+    setSelectedCell({ row: cell.row, col: cell.col })
+  }
+
+  // 셀 편집 저장
+  const handleCellSave = (newValue: string) => {
+    if (!editingCell) return
+
+    const { cell } = editingCell
+    const trimmedValue = newValue.trim()
+
     if (cell.type === 'yearly-goal') {
-      const element = document.getElementById('yearly-goal-input')
-      element?.focus()
-      setSelectedCell({ row: cell.row, col: cell.col })
+      setYearlyGoal(trimmedValue)
     } else if (cell.type === 'strategy' && cell.strategyIndex !== undefined) {
-      const element = document.getElementById(`strategy-input-${cell.strategyIndex}`)
-      element?.focus()
-      setSelectedCell({ row: cell.row, col: cell.col })
+      updateStrategy(cell.strategyIndex, trimmedValue)
     } else if (cell.type === 'action' && cell.strategyIndex !== undefined && cell.actionIndex !== undefined) {
-      const element = document.getElementById(`action-input-${cell.strategyIndex}-${cell.actionIndex}`)
-      element?.focus()
-      setSelectedCell({ row: cell.row, col: cell.col })
+      updateAction(cell.strategyIndex, cell.actionIndex, trimmedValue)
     }
+
+    setEditingCell(null)
+    setSelectedCell(null)
+  }
+
+  // 셀 편집 취소
+  const handleCellCancel = () => {
+    setEditingCell(null)
+    setSelectedCell(null)
   }
 
   // Setup Required 화면
@@ -698,7 +716,6 @@ function MandaratPageContent() {
                 fontWeight,
                 cursor: 'pointer',
                 overflow: 'hidden',
-                wordBreak: 'break-word',
                 lineHeight: '1.2',
                 maxHeight: '80px',
                 transition: 'background-color 0.2s',
@@ -713,36 +730,78 @@ function MandaratPageContent() {
                 finalStyle.borderRight = '2px solid #0070f3'
               }
 
+              const isEditing = editingCell?.row === row && editingCell?.col === col
+
               return (
                 <div
                   key={`${row}-${col}`}
-                  onClick={() => handleCellClick(cell)}
+                  onClick={() => !isEditing && handleCellClick(cell)}
                   style={finalStyle}
                   onMouseEnter={(e) => {
-                    if (!isSelected) {
+                    if (!isSelected && !isEditing) {
                       e.currentTarget.style.backgroundColor = hoverColor
                     }
                   }}
                   onMouseLeave={(e) => {
-                    if (!isSelected) {
+                    if (!isSelected && !isEditing) {
                       e.currentTarget.style.backgroundColor = backgroundColor
                     }
                   }}
-                  title={content || `${row + 1}-${col + 1}`}
+                  title={content && content.trim() ? content : undefined}
                 >
-                  <div
-                    style={{
-                      textAlign: 'center',
-                      maxHeight: '100%',
-                      overflow: 'hidden',
-                      display: '-webkit-box',
-                      WebkitLineClamp: 2,
-                      WebkitBoxOrient: 'vertical',
-                      width: '100%',
-                    }}
-                  >
-                    {content || ''}
-                  </div>
+                  {isEditing ? (
+                    <textarea
+                      value={editingCell.value}
+                      onChange={(e) => setEditingCell({ ...editingCell, value: e.target.value })}
+                      onBlur={() => handleCellSave(editingCell.value)}
+                      onKeyDown={(e) => {
+                        if ((e.key === 'Enter' && (e.metaKey || e.ctrlKey)) || e.key === 'Escape') {
+                          e.preventDefault()
+                          if (e.key === 'Escape') {
+                            handleCellCancel()
+                          } else {
+                            handleCellSave(editingCell.value)
+                          }
+                        }
+                        // Enter alone allows newline (default behavior)
+                      }}
+                      autoFocus
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        border: 'none',
+                        outline: 'none',
+                        backgroundColor: 'transparent',
+                        fontSize: '0.75rem',
+                        fontWeight,
+                        textAlign: 'center',
+                        padding: '0',
+                        margin: '0',
+                        fontFamily: 'inherit',
+                        resize: 'none',
+                        overflow: 'auto',
+                      }}
+                    />
+                  ) : (
+                    <div
+                      title={content && content.trim() ? content : undefined}
+                      style={{
+                        textAlign: 'center',
+                        width: '100%',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'pre-wrap',
+                        display: '-webkit-box',
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: 'vertical',
+                        fontSize: '0.75rem',
+                        fontWeight,
+                        lineHeight: '1.2',
+                      }}
+                    >
+                      {content || ''}
+                    </div>
+                  )}
                 </div>
               )
             })
@@ -750,116 +809,6 @@ function MandaratPageContent() {
         </div>
       </div>
 
-      {/* Editor */}
-      <div style={{ marginBottom: '2rem' }}>
-        <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Editor</h2>
-
-        {/* Yearly Goal */}
-        <div style={{ marginBottom: '2rem' }}>
-          <label
-            htmlFor="yearly-goal-input"
-            style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}
-          >
-            Yearly Goal
-          </label>
-          <textarea
-            id="yearly-goal-input"
-            value={yearlyGoal}
-            onChange={(e) => setYearlyGoal(e.target.value)}
-            rows={2}
-            style={{
-              width: '100%',
-              padding: '0.75rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              fontFamily: 'inherit',
-            }}
-            placeholder="연간 목표를 입력하세요"
-          />
-        </div>
-
-        {/* Strategies */}
-        <div style={{ marginBottom: '2rem' }}>
-          <h3 style={{ marginBottom: '1rem', fontSize: '1rem' }}>Strategies</h3>
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
-              gap: '1rem',
-            }}
-          >
-            {Array.from({ length: 8 }, (_, i) => (
-              <div key={i}>
-                <label
-                  htmlFor={`strategy-input-${i}`}
-                  style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem' }}
-                >
-                  Strategy {i + 1}
-                </label>
-                <input
-                  id={`strategy-input-${i}`}
-                  type="text"
-                  value={strategies[i]}
-                  onChange={(e) => updateStrategy(i, e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '0.5rem',
-                    border: '1px solid #ccc',
-                    borderRadius: '4px',
-                    fontSize: '0.875rem',
-                  }}
-                  placeholder={`Strategy ${i + 1}`}
-                />
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Actions */}
-        <div style={{ marginBottom: '2rem' }}>
-          <h3 style={{ marginBottom: '1rem', fontSize: '1rem' }}>Actions</h3>
-          {Array.from({ length: 8 }, (_, strategyIndex) => (
-            <div key={strategyIndex} style={{ marginBottom: '2rem' }}>
-              <h4 style={{ marginBottom: '0.75rem', fontSize: '0.9rem', fontWeight: '500' }}>
-                Strategy {strategyIndex + 1} Actions
-              </h4>
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
-                  gap: '0.75rem',
-                }}
-              >
-                {Array.from({ length: 8 }, (_, actionIndex) => (
-                  <div key={actionIndex}>
-                    <label
-                      htmlFor={`action-input-${strategyIndex}-${actionIndex}`}
-                      style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.75rem' }}
-                    >
-                      Action {actionIndex + 1}
-                    </label>
-                    <input
-                      id={`action-input-${strategyIndex}-${actionIndex}`}
-                      type="text"
-                      value={actions[strategyIndex]?.[actionIndex] || ''}
-                      onChange={(e) => updateAction(strategyIndex, actionIndex, e.target.value)}
-                      style={{
-                        width: '100%',
-                        padding: '0.5rem',
-                        border: '1px solid #ccc',
-                        borderRadius: '4px',
-                        fontSize: '0.75rem',
-                      }}
-                      placeholder={`Action ${actionIndex + 1}`}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
 
       {/* Error Message */}
       {error && (

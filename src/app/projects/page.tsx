@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { RequireAuth } from '@/components/auth/RequireAuth'
 import { t } from '@/lib/uiText/ko'
 import { getMonthKey } from '@/lib/keys'
-import { getProjects, setProjects as saveProjects, getMonthlyFocus, setMonthlyFocus } from '@/lib/mockStore'
+import { getProjects, setProjects as saveProjects, getMonthlyFocus, setMonthlyFocus, getWeeklyPlan, setWeeklyPlan } from '@/lib/mockStore'
 
 // Project 타입 정의 (기존 형식과 새 형식 모두 지원)
 interface Project {
@@ -149,12 +149,60 @@ function ProjectsPageContent() {
 
   // 프로젝트 삭제
   const handleDelete = (id: string) => {
-    if (!confirm('이 프로젝트를 삭제하시겠습니까?')) return
+    // 주간 작업에서 이 프로젝트와 연결된 작업 확인
+    const weeklyPlan = getWeeklyPlan()
+    let hasRelatedTasks = false
+    
+    for (const weekKey in weeklyPlan.weeks) {
+      const weekTasks = weeklyPlan.weeks[weekKey]?.tasks || []
+      if (weekTasks.some((task) => task.projectId === id)) {
+        hasRelatedTasks = true
+        break
+      }
+    }
+
+    // 관련 작업이 있으면 사용자에게 선택권 제공
+    let shouldDeleteTasks = false
+    if (hasRelatedTasks) {
+      // 프로젝트 삭제 확인
+      if (!confirm('이 프로젝트를 삭제하시겠습니까?')) return
+      
+      // 업무 처리 방법 선택
+      shouldDeleteTasks = confirm(
+        '이 프로젝트에 연결된 업무가 있습니다. 함께 삭제할까요?\n\n확인: 업무도 함께 삭제\n취소: 업무는 남기기'
+      )
+    } else {
+      // 관련 작업이 없으면 기존 동작 (즉시 삭제)
+      if (!confirm('이 프로젝트를 삭제하시겠습니까?')) return
+    }
 
     try {
+      // 프로젝트 삭제
       const updated = projects.filter((p) => p.id !== id)
       saveProjects(updated)
       setProjects(updated)
+
+      // 주간 작업 처리 (관련 작업이 있는 경우만)
+      if (hasRelatedTasks) {
+        const updatedWeeklyPlan: typeof weeklyPlan = { weeks: {} }
+        for (const weekKey in weeklyPlan.weeks) {
+          const weekTasks = weeklyPlan.weeks[weekKey]?.tasks || []
+          if (shouldDeleteTasks) {
+            // 관련 작업도 함께 삭제
+            updatedWeeklyPlan.weeks[weekKey] = {
+              tasks: weekTasks.filter((task) => task.projectId !== id),
+            }
+          } else {
+            // 관련 작업은 남기되 projectId를 null로 설정
+            updatedWeeklyPlan.weeks[weekKey] = {
+              tasks: weekTasks.map((task) =>
+                task.projectId === id ? { ...task, projectId: null } : task
+              ),
+            }
+          }
+        }
+        setWeeklyPlan(updatedWeeklyPlan)
+      }
 
       // 포커스에서도 제거
       if (focusedProjectIds.includes(id)) {

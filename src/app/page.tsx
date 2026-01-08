@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase/client'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { t } from '@/lib/uiText/ko'
+import { getProjects, getMonthlyFocus } from '@/lib/mockStore'
+import { getMonthKey } from '@/lib/keys'
 
 type AuthMode = 'login' | 'signup'
 
@@ -18,10 +20,74 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
 
-  // 세션이 있으면 /today로 리다이렉트
+  // 세션이 있으면 상태 기반 리다이렉트
   useEffect(() => {
     if (!loading && session) {
-      router.replace('/today')
+      const redirectBasedOnState = async () => {
+        try {
+          const userId = session.user.id
+
+          // 1. Mandarat 확인
+          const { data: boardData, error: boardError } = await supabase
+            .from('mandarat_boards')
+            .select('id, yearly_goal')
+            .eq('user_id', userId)
+            .limit(1)
+            .maybeSingle()
+
+          // board가 없거나 yearly_goal이 비어있으면 Mandarat으로
+          if (!boardData || !boardData.yearly_goal?.trim()) {
+            router.replace('/mandarat')
+            return
+          }
+
+          // Strategies와 Actions 확인
+          const { data: strategiesData } = await supabase
+            .from('mandarat_strategies')
+            .select('text_value')
+            .eq('board_id', boardData.id)
+            .limit(8)
+
+          const { data: actionsData } = await supabase
+            .from('mandarat_actions')
+            .select('text_value')
+            .eq('board_id', boardData.id)
+            .limit(1)
+
+          const hasMandaratData = 
+            (strategiesData && strategiesData.some(s => s.text_value?.trim())) ||
+            (actionsData && actionsData.some(a => a.text_value?.trim()))
+
+          if (!hasMandaratData) {
+            router.replace('/mandarat')
+            return
+          }
+
+          // 2. 프로젝트 확인
+          const projects = getProjects()
+          if (!projects || projects.length === 0) {
+            router.replace('/projects/new')
+            return
+          }
+
+          // 3. Monthly Focus 확인
+          const currentMonthKey = getMonthKey(new Date())
+          const focus = getMonthlyFocus()
+          if (!focus || focus.monthKey !== currentMonthKey || !focus.projectIds || focus.projectIds.length === 0) {
+            router.replace('/focus')
+            return
+          }
+
+          // 4. 그 외 → /weekly
+          router.replace('/weekly')
+        } catch (err) {
+          // 에러 발생 시 기본적으로 /mandarat로 리다이렉트
+          console.error('Failed to check app state:', err)
+          router.replace('/mandarat')
+        }
+      }
+
+      redirectBasedOnState()
     }
   }, [session, loading, router])
 
