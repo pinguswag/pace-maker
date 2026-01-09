@@ -3,30 +3,15 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { RequireAuth } from '@/components/auth/RequireAuth'
+import { StepNav } from '@/components/StepNav'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { t } from '@/lib/uiText/ko'
 import { getMonthKey } from '@/lib/keys'
-import { getProjects, setProjects as saveProjects, getMonthlyFocus, setMonthlyFocus, getWeeklyPlan, setWeeklyPlan } from '@/lib/mockStore'
+import { getMonthlyFocus, setMonthlyFocus, getWeeklyPlan, setWeeklyPlan } from '@/lib/mockStore'
+import { loadProjects, deleteProject, AppProject } from '@/lib/projects'
 
-// Project 타입 정의 (기존 형식과 새 형식 모두 지원)
-interface Project {
-  id: string
-  title: string
-  status: 'draft'
-  created_at: string
-  // 새 형식
-  source?: {
-    yearlyGoal: string
-    items: Array<{
-      strategy_index: number
-      action_index: number
-      strategy_text: string
-      action_text: string
-    }>
-  }
-  // 기존 형식 (호환성)
-  source_strategy_index?: number
-  source_action_index?: number
-}
+// Use AppProject type from projects.ts
+type Project = AppProject
 
 // Monthly Focus 타입 정의
 interface MonthlyFocus {
@@ -36,6 +21,7 @@ interface MonthlyFocus {
 
 function ProjectsPageContent() {
   const router = useRouter()
+  const { session } = useAuth()
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
@@ -43,19 +29,36 @@ function ProjectsPageContent() {
   const [monthKey, setMonthKey] = useState<string>('')
   const [monthResetNotice, setMonthResetNotice] = useState(false)
   const [maxReachedWarning, setMaxReachedWarning] = useState(false)
+  const [supabaseError, setSupabaseError] = useState<string | null>(null)
 
-  // localStorage에서 프로젝트 로드
+  // Load projects from Supabase (with localStorage fallback)
   useEffect(() => {
-    try {
-      const parsed = getProjects<Project[]>()
-      setProjects(Array.isArray(parsed) ? parsed : [])
-      setMonthKey(getMonthKey(new Date()))
-    } catch (err) {
-      console.error('Failed to load projects from localStorage:', err)
-    } finally {
+    if (!session?.user?.id) {
       setLoading(false)
+      return
     }
-  }, [])
+
+    const loadData = async () => {
+      try {
+        setLoading(true)
+        setSupabaseError(null)
+        const result = await loadProjects(session.user.id)
+        setProjects(result.projects)
+        setMonthKey(getMonthKey(new Date()))
+        
+        if (!result.fromSupabase && result.error) {
+          setSupabaseError('Supabase 연결 실패. 로컬 데이터를 사용 중입니다.')
+        }
+      } catch (err) {
+        console.error('Failed to load projects:', err)
+        setSupabaseError('프로젝트 로드 실패. 로컬 데이터를 사용 중입니다.')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    loadData()
+  }, [session])
 
   // 현재 월의 포커스 로드 및 월 변경 감지
   useEffect(() => {
@@ -148,7 +151,9 @@ function ProjectsPageContent() {
   }
 
   // 프로젝트 삭제
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
+    if (!session?.user?.id) return
+
     // 주간 작업에서 이 프로젝트와 연결된 작업 확인
     const weeklyPlan = getWeeklyPlan()
     let hasRelatedTasks = false
@@ -177,9 +182,11 @@ function ProjectsPageContent() {
     }
 
     try {
-      // 프로젝트 삭제
+      // 프로젝트 삭제 (Supabase)
+      await deleteProject(id, session.user.id)
+      
+      // 로컬 상태 업데이트
       const updated = projects.filter((p) => p.id !== id)
-      saveProjects(updated)
       setProjects(updated)
 
       // 주간 작업 처리 (관련 작업이 있는 경우만)
@@ -216,8 +223,9 @@ function ProjectsPageContent() {
         }
         setMonthlyFocus(updatedFocus)
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to delete project:', err)
+      alert('프로젝트 삭제에 실패했습니다: ' + (err?.message || '알 수 없는 오류'))
     }
   }
 
@@ -271,6 +279,21 @@ function ProjectsPageContent() {
           }}
         >
           {successMessage}
+        </div>
+      )}
+
+      {supabaseError && (
+        <div
+          style={{
+            color: '#856404',
+            marginBottom: '1rem',
+            padding: '0.75rem',
+            backgroundColor: '#fff3cd',
+            borderRadius: '4px',
+            fontSize: '0.875rem',
+          }}
+        >
+          {supabaseError}
         </div>
       )}
 
@@ -545,6 +568,20 @@ function ProjectsPageContent() {
           <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.875rem' }}>{t.messages.projectsEmptyHelper}</p>
         </div>
       )}
+
+      {/* Step Navigation */}
+      <StepNav
+        prev={{
+          href: '/projects/new',
+          label: '← 이전 단계(프로젝트 생성)',
+        }}
+        next={{
+          href: '/focus',
+          label: '다음 단계(먼슬리) →',
+          disabled: projects.length === 0,
+          hint: 'Project를 먼저 만들어 주세요.',
+        }}
+      />
     </div>
   )
 }

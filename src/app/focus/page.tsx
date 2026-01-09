@@ -3,36 +3,18 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { RequireAuth } from '@/components/auth/RequireAuth'
+import { StepNav } from '@/components/StepNav'
+import { useAuth } from '@/components/auth/AuthProvider'
 import { getMonthKey } from '@/lib/keys'
-import { getProjects, getMonthlyFocus, setMonthlyFocus } from '@/lib/mockStore'
+import { loadProjects, AppProject } from '@/lib/projects'
+import { loadMonthlyFocus, saveMonthlyFocus } from '@/lib/monthlyFocus'
 
-// Project 타입 정의
-interface Project {
-  id: string
-  title: string
-  status: 'draft'
-  created_at: string
-  source?: {
-    yearlyGoal: string
-    items: Array<{
-      strategy_index: number
-      action_index: number
-      strategy_text: string
-      action_text: string
-    }>
-  }
-  source_strategy_index?: number
-  source_action_index?: number
-}
-
-// Monthly Focus 타입 정의
-interface MonthlyFocus {
-  monthKey: string // "YYYY-MM"
-  projectIds: string[]
-}
+// Use AppProject type from projects.ts
+type Project = AppProject
 
 function FocusPageContent() {
   const router = useRouter()
+  const { session } = useAuth()
   const [projects, setProjects] = useState<Project[]>([])
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [monthKey, setMonthKey] = useState<string>('')
@@ -40,60 +22,65 @@ function FocusPageContent() {
   const [savedFeedback, setSavedFeedback] = useState(false)
   const [monthResetNotice, setMonthResetNotice] = useState(false)
   const [maxReachedWarning, setMaxReachedWarning] = useState(false)
+  const [supabaseError, setSupabaseError] = useState<string | null>(null)
 
-  // localStorage에서 프로젝트 로드
+  // Load projects from Supabase
   useEffect(() => {
-    try {
-      const parsed = getProjects<Project[]>()
-      setProjects(Array.isArray(parsed) ? parsed : [])
-    } catch (err) {
-      console.error('Failed to load projects from localStorage:', err)
-    } finally {
+    if (!session?.user?.id) {
       setLoading(false)
+      return
     }
-  }, [])
 
-  // 월별 포커스 로드 및 월 변경 감지
+    const loadData = async () => {
+      try {
+        setLoading(true)
+        const result = await loadProjects(session.user.id)
+        setProjects(result.projects)
+      } catch (err) {
+        console.error('Failed to load projects:', err)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    loadData()
+  }, [session])
+
+  // Load monthly focus from Supabase
   useEffect(() => {
+    if (!session?.user?.id) return
+
     const currentMonthKey = getMonthKey(new Date())
     setMonthKey(currentMonthKey)
 
-    try {
-      const parsed = getMonthlyFocus()
-      
-      // 저장된 월이 현재 월과 다르면 리셋
-      if (parsed.monthKey !== currentMonthKey) {
-        const newFocus: MonthlyFocus = {
-          monthKey: currentMonthKey,
-          projectIds: [],
-        }
-        setMonthlyFocus(newFocus)
-        setSelectedIds([])
-        setMonthResetNotice(true)
-        // 5초 후 알림 제거
-        setTimeout(() => setMonthResetNotice(false), 5000)
-      } else {
-        setSelectedIds(parsed.projectIds || [])
-      }
-    } catch (err) {
-      console.error('Failed to load monthly focus from localStorage:', err)
-      // 에러 발생 시 기본값 설정
-      const fallbackMonthKey = getMonthKey(new Date())
-      const newFocus: MonthlyFocus = {
-        monthKey: fallbackMonthKey,
-        projectIds: [],
-      }
+    const loadFocus = async () => {
       try {
-        setMonthlyFocus(newFocus)
-      } catch (e) {
-        console.error('Failed to initialize monthly focus:', e)
+        setSupabaseError(null)
+        const result = await loadMonthlyFocus(session.user.id, currentMonthKey)
+        
+        if (result.focus) {
+          setSelectedIds(result.focus.projectIds || [])
+        } else {
+          // No focus exists for this month, start with empty
+          setSelectedIds([])
+        }
+
+        if (!result.fromSupabase && result.error) {
+          setSupabaseError('Supabase 연결 실패. 로컬 데이터를 사용 중입니다.')
+        }
+      } catch (err) {
+        console.error('Failed to load monthly focus:', err)
+        setSupabaseError('월간 포커스 로드 실패. 로컬 데이터를 사용 중입니다.')
+        setSelectedIds([])
       }
-      setSelectedIds([])
     }
-  }, [])
+
+    loadFocus()
+  }, [session])
 
   // 선택된 프로젝트가 삭제되었는지 확인하고 정리
   useEffect(() => {
+    if (!session?.user?.id) return
     if (projects.length === 0 || selectedIds.length === 0) return
 
     const validIds = projects.map((p) => p.id)
@@ -101,38 +88,37 @@ function FocusPageContent() {
 
     if (filteredIds.length !== selectedIds.length) {
       // 삭제된 프로젝트가 선택 목록에 있으면 제거
-      setSelectedIds(filteredIds)
       const currentMonthKey = getMonthKey(new Date())
-      const updatedFocus: MonthlyFocus = {
-        monthKey: currentMonthKey,
-        projectIds: filteredIds,
-      }
-      try {
-        setMonthlyFocus(updatedFocus)
-      } catch (err) {
+      setSelectedIds(filteredIds)
+      
+      // Save cleaned up focus to Supabase
+      saveMonthlyFocus(currentMonthKey, filteredIds, session.user.id, validIds).catch((err) => {
         console.error('Failed to update monthly focus after cleanup:', err)
-      }
+      })
     }
-  }, [projects, selectedIds])
+  }, [projects, selectedIds, session])
 
   // 프로젝트 선택/해제 핸들러
-  const handleToggle = (projectId: string) => {
+  const handleToggle = async (projectId: string) => {
+    if (!session?.user?.id) return
+
     const currentMonthKey = getMonthKey(new Date())
     
     if (selectedIds.includes(projectId)) {
       // 해제
       const updated = selectedIds.filter((id) => id !== projectId)
       setSelectedIds(updated)
-      const updatedFocus: MonthlyFocus = {
-        monthKey: currentMonthKey,
-        projectIds: updated,
-      }
+      
       try {
-        setMonthlyFocus(updatedFocus)
+        const validProjectIds = projects.map((p) => p.id)
+        await saveMonthlyFocus(currentMonthKey, updated, session.user.id, validProjectIds)
         setSavedFeedback(true)
         setTimeout(() => setSavedFeedback(false), 2000)
-      } catch (err) {
+      } catch (err: any) {
         console.error('Failed to save monthly focus:', err)
+        alert('저장에 실패했습니다: ' + (err?.message || '알 수 없는 오류'))
+        // Revert on error
+        setSelectedIds(selectedIds)
       }
     } else {
       // 선택 (최대 3개 체크)
@@ -143,16 +129,17 @@ function FocusPageContent() {
       }
       const updated = [...selectedIds, projectId]
       setSelectedIds(updated)
-      const updatedFocus: MonthlyFocus = {
-        monthKey: currentMonthKey,
-        projectIds: updated,
-      }
+      
       try {
-        setMonthlyFocus(updatedFocus)
+        const validProjectIds = projects.map((p) => p.id)
+        await saveMonthlyFocus(currentMonthKey, updated, session.user.id, validProjectIds)
         setSavedFeedback(true)
         setTimeout(() => setSavedFeedback(false), 2000)
-      } catch (err) {
+      } catch (err: any) {
         console.error('Failed to save monthly focus:', err)
+        alert('저장에 실패했습니다: ' + (err?.message || '알 수 없는 오류'))
+        // Revert on error
+        setSelectedIds(selectedIds)
       }
     }
   }
@@ -166,11 +153,26 @@ function FocusPageContent() {
   }
 
   return (
-    <div style={{ padding: '2rem', maxWidth: '800px', margin: '0 auto' }}>
+    <div style={{ padding: '2rem', maxWidth: '800px', margin: '0 auto', position: 'relative' }}>
       <h1 style={{ marginBottom: '0.5rem' }}>Monthly Focus</h1>
       <p style={{ color: '#666', marginBottom: '2rem', fontSize: '0.875rem' }}>
         {monthKey || getMonthKey(new Date())}
       </p>
+
+      {supabaseError && (
+        <div
+          style={{
+            color: '#856404',
+            marginBottom: '1rem',
+            padding: '0.75rem',
+            backgroundColor: '#fff3cd',
+            borderRadius: '4px',
+            fontSize: '0.875rem',
+          }}
+        >
+          {supabaseError}
+        </div>
+      )}
 
       {/* 월 리셋 알림 */}
       {monthResetNotice && (
@@ -291,6 +293,20 @@ function FocusPageContent() {
           })}
         </div>
       )}
+
+      {/* Step Navigation */}
+      <StepNav
+        prev={{
+          href: '/projects',
+          label: '← 이전 단계(프로젝트)',
+        }}
+        next={{
+          href: '/weekly',
+          label: '다음 단계(위클리) →',
+          disabled: selectedIds.length === 0,
+          hint: '이번 달 집중할 프로젝트를 선택해 주세요.',
+        }}
+      />
     </div>
   )
 }

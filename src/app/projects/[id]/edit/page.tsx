@@ -6,7 +6,7 @@ import { RequireAuth } from '@/components/auth/RequireAuth'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { supabase } from '@/lib/supabase/client'
 import { t } from '@/lib/uiText/ko'
-import { getProjects, setProjects as saveProjects } from '@/lib/mockStore'
+import { loadProjects, updateProject, AppProject } from '@/lib/projects'
 
 // 선택된 액션 타입
 interface SelectedAction {
@@ -22,27 +22,8 @@ interface ManualItem {
   title: string
 }
 
-// Project 타입
-interface Project {
-  id: string
-  title: string
-  status: 'draft'
-  created_at: string
-  source?: {
-    yearlyGoal: string
-    items: Array<{
-      id: string
-      title: string
-      source: 'mandarat' | 'manual'
-      strategy_index?: number
-      action_index?: number
-      strategy_text?: string
-      action_text?: string
-    }>
-  }
-  source_strategy_index?: number
-  source_action_index?: number
-}
+// Use AppProject type from projects.ts
+type Project = AppProject
 
 // 테이블 누락 에러 감지
 const isTableMissingError = (error: any): boolean => {
@@ -81,41 +62,59 @@ function ProjectEditPageContent() {
 
   // 프로젝트 로드
   useEffect(() => {
-    try {
-      const parsed = getProjects<Project[]>()
-      const projects = Array.isArray(parsed) ? parsed : []
-      setExistingProjects(projects)
-      
-      const foundProject = projects.find((p: Project) => p.id === projectId)
-      if (foundProject) {
-        setProject(foundProject)
-        setProjectTitle(foundProject.title)
-        
-        // 현재 프로젝트의 액션들을 초기 선택으로 설정
-        if (foundProject.source && foundProject.source.items) {
-          setSelectedActions(
-            foundProject.source.items.map((item) => ({
-              strategy_index: item.strategy_index,
-              action_index: item.action_index,
-              strategy_text: item.strategy_text,
-              action_text: item.action_text,
-            }))
-          )
-        } else if ('source_strategy_index' in foundProject && 'source_action_index' in foundProject) {
-          // 기존 형식 호환성
-          const strategyIdx = (foundProject as any).source_strategy_index
-          const actionIdx = (foundProject as any).source_action_index
-          if (strategyIdx !== undefined && actionIdx !== undefined) {
-            // Mandarat 데이터가 로드된 후에 텍스트를 채워야 함
-            // 일단 인덱스만 저장
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Failed to load project:', err)
-      setError('프로젝트를 불러오는 중 오류가 발생했습니다.')
+    if (!session?.user?.id) {
+      setLoading(false)
+      return
     }
-  }, [projectId])
+
+    const loadProjectData = async () => {
+      try {
+        setLoading(true)
+        setError(null)
+
+        // Load all projects to check for duplicates
+        const result = await loadProjects(session.user.id)
+        setExistingProjects(result.projects)
+        
+        const foundProject = result.projects.find((p: Project) => p.id === projectId)
+        if (foundProject) {
+          setProject(foundProject)
+          setProjectTitle(foundProject.title)
+          
+          // 현재 프로젝트의 액션들을 초기 선택으로 설정
+          if (foundProject.source && foundProject.source.items) {
+            setSelectedActions(
+              foundProject.source.items
+                .filter((item) => item.strategy_index !== undefined && item.action_index !== undefined)
+                .map((item) => ({
+                  strategy_index: item.strategy_index!,
+                  action_index: item.action_index!,
+                  strategy_text: item.strategy_text || '',
+                  action_text: item.action_text || '',
+                }))
+            )
+          } else if ('source_strategy_index' in foundProject && 'source_action_index' in foundProject) {
+            // 기존 형식 호환성
+            const strategyIdx = (foundProject as any).source_strategy_index
+            const actionIdx = (foundProject as any).source_action_index
+            if (strategyIdx !== undefined && actionIdx !== undefined) {
+              // Mandarat 데이터가 로드된 후에 텍스트를 채워야 함
+              // 일단 인덱스만 저장
+            }
+          }
+        } else {
+          setError('프로젝트를 찾을 수 없습니다.')
+        }
+      } catch (err) {
+        console.error('Failed to load project:', err)
+        setError('프로젝트를 불러오는 중 오류가 발생했습니다.')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    loadProjectData()
+  }, [projectId, session])
 
   // Mandarat 데이터 로드
   const loadMandaratData = useCallback(async () => {
@@ -223,10 +222,10 @@ function ProjectEditPageContent() {
         // Mandarat 데이터 로드 후, 선택된 액션의 텍스트를 최신 값으로 업데이트
         if (project && project.source && project.source.items) {
           const mandaratItems = project.source.items.filter(
-            (item) => item.source === 'mandarat' && item.strategy_index !== undefined && item.action_index !== undefined
+            (item) => item.strategy_index !== undefined && item.action_index !== undefined
           )
           const updatedSelectedActions = mandaratItems.map((item) => {
-            const latestActionText = actionsArray[item.strategy_index!]?.[item.action_index!] || item.action_text || item.title
+            const latestActionText = actionsArray[item.strategy_index!]?.[item.action_index!] || item.action_text || ''
             const latestStrategyText = strategiesArray[item.strategy_index!] || item.strategy_text || ''
             return {
               strategy_index: item.strategy_index!,
@@ -448,21 +447,33 @@ function ProjectEditPageContent() {
         source: 'manual' as const,
       }))
 
-      // 프로젝트 업데이트
-      const updatedProject: Project = {
-        ...project!,
-        title: projectTitle.trim(),
-        source: {
-          yearlyGoal: yearlyGoal,
-          items: [...mandaratItems, ...manualItemsFormatted],
-        },
+      if (!session?.user?.id) {
+        setError('로그인이 필요합니다.')
+        setSaving(false)
+        return
       }
 
-      // localStorage 업데이트
-      const updatedProjects = existingProjects.map((p) =>
-        p.id === projectId ? updatedProject : p
+      // Convert items to source_items format (only mandarat items)
+      const sourceItems = mandaratItems.map((item) => ({
+        strategy_index: item.strategy_index,
+        action_index: item.action_index,
+        strategy_text: item.strategy_text,
+        action_text: item.action_text,
+      }))
+
+      // Update project in Supabase
+      await updateProject(
+        projectId,
+        {
+          title: projectTitle.trim(),
+          status: 'draft',
+          source: {
+            yearlyGoal: yearlyGoal,
+            items: sourceItems,
+          },
+        },
+        session.user.id
       )
-      saveProjects(updatedProjects)
 
       // 성공 메시지와 함께 리다이렉트
       router.push('/projects?edited=true')

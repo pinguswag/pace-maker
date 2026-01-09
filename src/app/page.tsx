@@ -1,107 +1,83 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, usePathname } from 'next/navigation'
 import { supabase } from '@/lib/supabase/client'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { t } from '@/lib/uiText/ko'
-import { getProjects, getMonthlyFocus } from '@/lib/mockStore'
-import { getMonthKey } from '@/lib/keys'
+import { getEntryRoute } from '@/lib/entryRoute'
 
 type AuthMode = 'login' | 'signup'
 
 export default function HomePage() {
   const { session, loading } = useAuth()
   const router = useRouter()
+  const pathname = usePathname()
   const [mode, setMode] = useState<AuthMode>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [authLoading, setAuthLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
+  const [checkingState, setCheckingState] = useState(false)
 
-  // 세션이 있으면 상태 기반 리다이렉트
+  // 앱 진입점("/")에서만 상태 기반 리다이렉트 실행
   useEffect(() => {
-    if (!loading && session) {
-      const redirectBasedOnState = async () => {
-        try {
-          const userId = session.user.id
+    // pathname이 "/"가 아니면 리다이렉트 로직 실행하지 않음
+    if (pathname !== '/') return
 
-          // 1. Mandarat 확인
-          const { data: boardData, error: boardError } = await supabase
-            .from('mandarat_boards')
-            .select('id, yearly_goal')
-            .eq('user_id', userId)
-            .limit(1)
-            .maybeSingle()
+    // 인증 로딩 중이면 대기
+    if (loading) return
 
-          // board가 없거나 yearly_goal이 비어있으면 Mandarat으로
-          if (!boardData || !boardData.yearly_goal?.trim()) {
-            router.replace('/mandarat')
-            return
-          }
+    // 인증되지 않은 경우 -> 로그인 폼을 보여주기 위해 리다이렉트하지 않음
+    if (!session) {
+      return
+    }
 
-          // Strategies와 Actions 확인
-          const { data: strategiesData } = await supabase
-            .from('mandarat_strategies')
-            .select('text_value')
-            .eq('board_id', boardData.id)
-            .limit(8)
-
-          const { data: actionsData } = await supabase
-            .from('mandarat_actions')
-            .select('text_value')
-            .eq('board_id', boardData.id)
-            .limit(1)
-
-          const hasMandaratData = 
-            (strategiesData && strategiesData.some(s => s.text_value?.trim())) ||
-            (actionsData && actionsData.some(a => a.text_value?.trim()))
-
-          if (!hasMandaratData) {
-            router.replace('/mandarat')
-            return
-          }
-
-          // 2. 프로젝트 확인
-          const projects = getProjects()
-          if (!projects || projects.length === 0) {
-            router.replace('/projects/new')
-            return
-          }
-
-          // 3. Monthly Focus 확인
-          const currentMonthKey = getMonthKey(new Date())
-          const focus = getMonthlyFocus()
-          if (!focus || focus.monthKey !== currentMonthKey || !focus.projectIds || focus.projectIds.length === 0) {
-            router.replace('/focus')
-            return
-          }
-
-          // 4. 그 외 → /weekly
-          router.replace('/weekly')
-        } catch (err) {
-          // 에러 발생 시 기본적으로 /mandarat로 리다이렉트
-          console.error('Failed to check app state:', err)
+    // 세션이 있고 pathname이 "/"인 경우에만 상태 체크 및 리다이렉트
+    let isMounted = true
+    
+    const redirectBasedOnState = async () => {
+      if (!isMounted) return
+      
+      setCheckingState(true)
+      try {
+        const userId = session.user.id
+        const route = await getEntryRoute(userId)
+        
+        if (!isMounted) return
+        router.replace(route)
+      } catch (err) {
+        // 에러 발생 시 기본적으로 /mandarat로 리다이렉트
+        console.error('Failed to check app state:', err)
+        if (isMounted) {
           router.replace('/mandarat')
         }
+      } finally {
+        if (isMounted) {
+          setCheckingState(false)
+        }
       }
-
-      redirectBasedOnState()
     }
-  }, [session, loading, router])
 
-  // 로딩 중이면 로딩 화면 표시
-  if (loading) {
+    redirectBasedOnState()
+    
+    return () => {
+      isMounted = false
+    }
+  }, [session, loading, router, pathname])
+
+  // 로딩 중이거나 상태 체크 중이면 로딩 화면 표시
+  if (loading || checkingState) {
     return (
       <div style={{ padding: '2rem', textAlign: 'center' }}>
-        <p>{t.common.loading}</p>
+        <p>불러오는 중...</p>
       </div>
     )
   }
 
-  // 세션이 있으면 아무것도 렌더링하지 않음 (리다이렉트 중)
-  if (session) {
+  // 세션이 있고 pathname이 "/"인 경우 리다이렉트 중이므로 아무것도 렌더링하지 않음
+  if (session && pathname === '/') {
     return null
   }
 
@@ -124,7 +100,8 @@ export default function HomePage() {
           return
         }
 
-        router.replace('/today')
+        // 로그인 성공 시 루트로 리다이렉트하여 상태 기반 리다이렉트 로직 실행
+        router.replace('/')
       } else {
         // Sign up
         const { error: signUpError, data } = await supabase.auth.signUp({
@@ -144,8 +121,8 @@ export default function HomePage() {
           setEmail('')
           setPassword('')
         } else if (data.session) {
-          // 자동 로그인된 경우
-          router.replace('/today')
+          // 자동 로그인된 경우 루트로 리다이렉트하여 상태 기반 리다이렉트 로직 실행
+          router.replace('/')
         }
       }
     } catch (err) {
@@ -163,7 +140,7 @@ export default function HomePage() {
       const { error: oauthError } = await supabase.auth.signInWithOAuth({
         provider,
         options: {
-          redirectTo: `${window.location.origin}/today`,
+          redirectTo: `${window.location.origin}/`,
         },
       })
 

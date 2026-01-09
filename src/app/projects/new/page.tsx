@@ -3,9 +3,10 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { RequireAuth } from '@/components/auth/RequireAuth'
+import { StepNav } from '@/components/StepNav'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { supabase } from '@/lib/supabase/client'
-import { getProjects, setProjects as saveProjects } from '@/lib/mockStore'
+import { loadProjects, createProject, AppProject } from '@/lib/projects'
 
 // 선택된 액션 타입
 interface SelectedAction {
@@ -21,25 +22,8 @@ interface ManualItem {
   title: string
 }
 
-// Project 타입 (새로운 구조)
-interface Project {
-  id: string
-  title: string
-  status: 'draft'
-  created_at: string
-  source: {
-    yearlyGoal: string
-    items: Array<{
-      id: string
-      title: string
-      source: 'mandarat' | 'manual'
-      strategy_index?: number
-      action_index?: number
-      strategy_text?: string
-      action_text?: string
-    }>
-  }
-}
+// Use AppProject type from projects.ts
+type Project = AppProject
 
 // 테이블 누락 에러 감지
 const isTableMissingError = (error: any): boolean => {
@@ -73,6 +57,22 @@ function ProjectsNewPageContent() {
   const [existingProjects, setExistingProjects] = useState<Project[]>([])
   const [manualItems, setManualItems] = useState<ManualItem[]>([])
   const [manualItemInput, setManualItemInput] = useState('')
+
+  // Load existing projects
+  useEffect(() => {
+    if (!session?.user?.id) return
+    
+    const loadExisting = async () => {
+      try {
+        const result = await loadProjects(session.user.id)
+        setExistingProjects(result.projects)
+      } catch (err) {
+        console.error('Failed to load existing projects:', err)
+      }
+    }
+    
+    loadExisting()
+  }, [session])
 
   // Mandarat 데이터 로드
   const loadMandaratData = useCallback(async () => {
@@ -188,17 +188,6 @@ function ProjectsNewPageContent() {
     loadMandaratData()
   }, [loadMandaratData])
 
-  // 기존 프로젝트 로드 (중복 체크용)
-  useEffect(() => {
-    try {
-      const parsed = getProjects<Project[]>()
-      // 기존 형식과 새 형식 모두 지원
-      const projects = Array.isArray(parsed) ? parsed : []
-      setExistingProjects(projects)
-    } catch (err) {
-      console.error('Failed to load existing projects:', err)
-    }
-  }, [])
 
   // 액션이 이미 프로젝트에 포함되어 있는지 확인
   const isActionAlreadyInProject = (strategyIndex: number, actionIndex: number): boolean => {
@@ -431,21 +420,32 @@ function ProjectsNewPageContent() {
         source: 'manual' as const,
       }))
 
-      // 새 프로젝트 생성 (단일 프로젝트)
-      const newProject: Project = {
-        id: `project_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        title: projectTitle.trim(),
-        status: 'draft',
-        created_at: new Date().toISOString(),
-        source: {
-          yearlyGoal: yearlyGoal,
-          items: [...mandaratItems, ...manualItemsFormatted],
-        },
+      if (!session?.user?.id) {
+        setError('로그인이 필요합니다.')
+        setCreating(false)
+        return
       }
 
-      // localStorage에 저장 (기존 프로젝트와 병합)
-      const allProjects = [...existingProjects, newProject]
-      saveProjects(allProjects)
+      // Convert items to source_items format (only mandarat items, manual items are stored differently)
+      const sourceItems = mandaratItems.map((item) => ({
+        strategy_index: item.strategy_index,
+        action_index: item.action_index,
+        strategy_text: item.strategy_text,
+        action_text: item.action_text,
+      }))
+
+      // Create project in Supabase
+      const newProject = await createProject(
+        {
+          title: projectTitle.trim(),
+          status: 'draft',
+          source: {
+            yearlyGoal: yearlyGoal,
+            items: sourceItems,
+          },
+        },
+        session.user.id
+      )
 
       // 성공 메시지와 함께 리다이렉트
       router.push('/projects?created=true')
@@ -1080,6 +1080,18 @@ function ProjectsNewPageContent() {
           </div>
         </div>
       )}
+
+      {/* Step Navigation */}
+      <StepNav
+        prev={{
+          href: '/mandarat',
+          label: '← 이전 단계(만다라트)',
+        }}
+        next={{
+          href: '/projects',
+          label: '다음 단계(프로젝트) →',
+        }}
+      />
     </div>
   )
 }

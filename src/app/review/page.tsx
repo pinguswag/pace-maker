@@ -2,43 +2,25 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { RequireAuth } from '@/components/auth/RequireAuth'
+import { StepNav } from '@/components/StepNav'
 import { t } from '@/lib/uiText/ko'
 import { getWeekKey } from '@/lib/keys'
-import { getProjects, getWeeklyPlan, setWeeklyPlan } from '@/lib/mockStore'
+import { useAuth } from '@/components/auth/AuthProvider'
+import {
+  loadWeeklyTasks as loadWeeklyTasksFromDB,
+  createWeeklyTask,
+  AppWeeklyTask,
+} from '@/lib/weeklyTasks'
 
-// Weekly Task 타입 정의
-interface WeeklyTask {
-  id: string
-  projectId: string | null // null 허용 (삭제된 프로젝트)
-  title: string
-  status: 'todo' | 'done'
-  order: number
-  created_at: string
-  pickedDate?: string
-}
+// Use types from lib files
+type WeeklyTask = AppWeeklyTask
 
-// Weekly Plan 타입 정의
-interface WeeklyPlan {
-  weeks: Record<string, { tasks: WeeklyTask[] }>
-}
-
-// Project 타입 정의
+// Project 타입 정의 (for display only)
 interface Project {
   id: string
   title: string
   status: 'draft'
   created_at: string
-  source?: {
-    yearlyGoal: string
-    items: Array<{
-      strategy_index: number
-      action_index: number
-      strategy_text: string
-      action_text: string
-    }>
-  }
-  source_strategy_index?: number
-  source_action_index?: number
 }
 
 function getCurrentWeekKey(): string {
@@ -52,6 +34,7 @@ function getNextWeekKey(): string {
 }
 
 function ReviewPageContent() {
+  const { session } = useAuth()
   const [tasks, setTasks] = useState<WeeklyTask[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
@@ -70,46 +53,30 @@ function ReviewPageContent() {
   }, [])
 
   // 리뷰 데이터 로드 (프로젝트 + 주간 작업)
-  const loadReviewData = useCallback(() => {
-    // 프로젝트 로드
-    try {
-      const parsed = getProjects<Project[]>()
-      setProjects(Array.isArray(parsed) ? parsed : [])
-    } catch (err) {
-      console.error('Failed to load projects from localStorage:', err)
-      setProjects([])
+  const loadReviewData = useCallback(async () => {
+    if (!session?.user?.id || !weekKey) {
+      setLoading(false)
+      return
     }
 
-    // 주간 작업 로드
-    if (!weekKey) return
+    // 프로젝트는 display only이므로 빈 배열로 설정
+    setProjects([])
 
+    // 주간 작업 로드
     try {
-      const parsed: WeeklyPlan = getWeeklyPlan()
-      const weekData = parsed.weeks?.[weekKey]
-      if (weekData && Array.isArray(weekData.tasks)) {
-        setTasks(weekData.tasks)
-      } else {
-        setTasks([])
-      }
+      const result = await loadWeeklyTasksFromDB(session.user.id, weekKey)
+      setTasks(result.tasks)
     } catch (err) {
-      console.error('Failed to load weekly tasks from localStorage:', err)
+      console.error('Failed to load weekly tasks:', err)
       setTasks([])
     } finally {
       setLoading(false)
     }
-  }, [weekKey])
+  }, [weekKey, session])
 
   // 초기 로드 및 이벤트 리스너 설정
   useEffect(() => {
     loadReviewData()
-
-    // Storage 이벤트 리스너 (다른 탭에서 localStorage 변경 감지)
-    const onStorage = (e: StorageEvent) => {
-      if (!e.key) return
-      if (e.key.startsWith('mock_')) {
-        loadReviewData()
-      }
-    }
 
     // 커스텀 이벤트 리스너 (같은 탭 내에서 데이터 변경 감지)
     const onCustom = () => {
@@ -128,13 +95,11 @@ function ReviewPageContent() {
       }
     }
 
-    window.addEventListener('storage', onStorage)
     window.addEventListener('app:data-changed' as any, onCustom)
     window.addEventListener('focus', onFocus)
     document.addEventListener('visibilitychange', onVisibilityChange)
 
     return () => {
-      window.removeEventListener('storage', onStorage)
       window.removeEventListener('app:data-changed' as any, onCustom)
       window.removeEventListener('focus', onFocus)
       document.removeEventListener('visibilitychange', onVisibilityChange)
@@ -192,17 +157,13 @@ function ReviewPageContent() {
   }
 
   // 다음 주로 이월
-  const handleCarryOver = () => {
-    if (!weekKey || !nextWeekKey || carryOverSelections.size === 0) return
+  const handleCarryOver = async () => {
+    if (!weekKey || !nextWeekKey || carryOverSelections.size === 0 || !session?.user?.id) return
 
     try {
-      const weeklyPlan: WeeklyPlan = getWeeklyPlan()
-      if (!weeklyPlan.weeks) {
-        weeklyPlan.weeks = {}
-      }
-
       // 다음 주의 기존 작업 로드
-      const nextWeekTasks = weeklyPlan.weeks[nextWeekKey]?.tasks || []
+      const nextWeekResult = await loadWeeklyTasksFromDB(session.user.id, nextWeekKey)
+      const nextWeekTasks = nextWeekResult.tasks || []
       
       // 중복 체크용: projectId + title 조합
       const existingTaskKeys = new Set(
@@ -211,51 +172,35 @@ function ReviewPageContent() {
 
       let carried = 0
       let duplicates = 0
-      const newTasks: WeeklyTask[] = []
 
       // 선택된 작업들을 다음 주로 복사
-      carryOverSelections.forEach((taskId) => {
+      for (const taskId of carryOverSelections) {
         const task = tasks.find((t) => t.id === taskId)
-        if (!task) return
+        if (!task) continue
 
         const taskKey = `${task.projectId}:${task.title.toLowerCase().trim()}`
         
         // 중복 체크
         if (existingTaskKeys.has(taskKey)) {
           duplicates += 1
-          return
+          continue
         }
 
-        // 새 작업 생성
-        const newTask: WeeklyTask = {
-          id: `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          projectId: task.projectId,
-          title: task.title,
-          status: 'todo',
-          order: nextWeekTasks.length + newTasks.length,
-          created_at: new Date().toISOString(),
-          // pickedDate는 undefined로 설정
-        }
+        // 새 작업 생성 (DB에 insert)
+        await createWeeklyTask(
+          nextWeekKey,
+          task.projectId,
+          task.title,
+          session.user.id,
+          nextWeekTasks.length + carried // order_index
+        )
 
-        newTasks.push(newTask)
         existingTaskKeys.add(taskKey)
         carried += 1
-      })
-
-      // 다음 주 작업에 추가
-      const updatedNextWeekTasks = [...nextWeekTasks, ...newTasks]
-      
-      // order 정규화
-      const normalizedTasks = updatedNextWeekTasks.map((task, index) => ({
-        ...task,
-        order: index,
-      }))
-
-    weeklyPlan.weeks[nextWeekKey] = { tasks: normalizedTasks }
-    setWeeklyPlan(weeklyPlan)
+      }
 
       // 데이터 리로드
-      loadReviewData()
+      await loadReviewData()
 
       // 성공 메시지
       const messages = []
@@ -275,6 +220,7 @@ function ReviewPageContent() {
       setCarryOverSelections(new Set())
     } catch (err) {
       console.error('Failed to carry over tasks:', err)
+      alert('작업 이월에 실패했습니다: ' + (err as any)?.message)
     }
   }
 
@@ -500,6 +446,14 @@ function ReviewPageContent() {
           </button>
         </div>
       )}
+
+      {/* Step Navigation */}
+      <StepNav
+        prev={{
+          href: '/today',
+          label: '← 이전 단계(투데이)',
+        }}
+      />
     </div>
   )
 }

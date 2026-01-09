@@ -3,53 +3,32 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { RequireAuth } from '@/components/auth/RequireAuth'
+import { StepNav } from '@/components/StepNav'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { supabase } from '@/lib/supabase/client'
 import { t } from '@/lib/uiText/ko'
 import { getWeekKey, getDateKey } from '@/lib/keys'
 import {
-  getProjects,
-  getWeeklyPlan,
-  setWeeklyPlan,
+  loadWeeklyTasks as loadWeeklyTasksFromDB,
+  updateWeeklyTask,
+  AppWeeklyTask,
+} from '@/lib/weeklyTasks'
+import {
   getRoutines,
   setRoutines as saveRoutines,
   getRoutineCompletion,
   setRoutineCompletion,
 } from '@/lib/mockStore'
 
-// Weekly Task 타입 정의
-interface WeeklyTask {
-  id: string
-  projectId: string | null // null 허용 (삭제된 프로젝트)
-  title: string
-  status: 'todo' | 'done'
-  order: number
-  created_at: string
-  pickedDate?: string // "YYYY-MM-DD" local date
-}
+// Use types from lib files
+type WeeklyTask = AppWeeklyTask
 
-// Weekly Plan 타입 정의
-interface WeeklyPlan {
-  weeks: Record<string, { tasks: WeeklyTask[] }>
-}
-
-// Project 타입 정의
+// Project 타입 정의 (for display only, not used for DB operations)
 interface Project {
   id: string
   title: string
   status: 'draft'
   created_at: string
-  source?: {
-    yearlyGoal: string
-    items: Array<{
-      strategy_index: number
-      action_index: number
-      strategy_text: string
-      action_text: string
-    }>
-  }
-  source_strategy_index?: number
-  source_action_index?: number
 }
 
 // Routine 타입 정의
@@ -113,14 +92,10 @@ function TodayPageContent() {
     setTodayDay(todayDayIndex)
   }, [])
 
-  // 프로젝트 로드
+  // 프로젝트 로드 (for display only, not used for DB operations)
   useEffect(() => {
-    try {
-      const parsed = getProjects<Project[]>()
-      setProjects(Array.isArray(parsed) ? parsed : [])
-    } catch (err) {
-      console.error('Failed to load projects from localStorage:', err)
-    }
+    // Projects are not needed for today page, but keep for compatibility
+    setProjects([])
   }, [])
 
   // 루틴 로드 (모든 루틴)
@@ -149,103 +124,54 @@ function TodayPageContent() {
     }
   }, [])
 
-  // 주간 작업 로드
-  const loadWeeklyTasks = useCallback(() => {
-    if (!weekKey) return
+  // 주간 작업 로드 (picked_for_today = true인 것만)
+  const loadWeeklyTasks = useCallback(async () => {
+    if (!weekKey || !session?.user?.id) {
+      setLoading(false)
+      return
+    }
 
     try {
-      const parsed: WeeklyPlan = getWeeklyPlan()
-      const weekData = parsed.weeks?.[weekKey]
-      if (weekData && Array.isArray(weekData.tasks)) {
-        // pickedDate가 오늘 날짜인 작업만 필터링
-        const todayTasks = weekData.tasks.filter(
-          (task) => task.pickedDate === todayDate
-        )
-        setTasks(todayTasks)
-      } else {
-        setTasks([])
-      }
+      const result = await loadWeeklyTasksFromDB(session.user.id, weekKey, todayDate)
+      // Filter tasks where picked_for_today = true (which maps to pickedDate === todayDate)
+      const todayTasks = result.tasks.filter((task) => task.pickedDate === todayDate)
+      setTasks(todayTasks)
     } catch (err) {
-      console.error('Failed to load weekly tasks from localStorage:', err)
+      console.error('Failed to load weekly tasks:', err)
       setTasks([])
     } finally {
       setLoading(false)
     }
-  }, [weekKey, todayDate])
+  }, [weekKey, todayDate, session])
 
   useEffect(() => {
     loadWeeklyTasks()
   }, [loadWeeklyTasks])
 
-  // 주간 작업 저장
-  const saveWeeklyTasks = useCallback(
-    (updatedTasks: WeeklyTask[]) => {
-      if (!weekKey) return
-
-      try {
-        const weeklyPlan: WeeklyPlan = getWeeklyPlan()
-        if (!weeklyPlan.weeks) {
-          weeklyPlan.weeks = {}
-        }
-
-        // 현재 주의 모든 작업 로드
-        const currentWeekTasks = weeklyPlan.weeks[weekKey]?.tasks || []
-        
-        // 오늘 작업만 업데이트하고 나머지는 유지
-        const updatedWeekTasks = currentWeekTasks.map((task) => {
-          const updatedTask = updatedTasks.find((t) => t.id === task.id)
-          return updatedTask || task
-        })
-
-        // order 정규화 (0부터 시작)
-        const normalizedTasks = updatedWeekTasks.map((task, index) => ({
-          ...task,
-          order: index,
-          status: task.status as 'todo' | 'done',
-        }))
-
-        weeklyPlan.weeks[weekKey] = { tasks: normalizedTasks }
-        setWeeklyPlan(weeklyPlan)
-        
-        // 오늘 작업만 다시 필터링하여 상태 업데이트
-        const todayTasks = normalizedTasks.filter(
-          (task) => task.pickedDate === todayDate
-        )
-        setTasks(todayTasks)
-      } catch (err) {
-        console.error('Failed to save weekly tasks to localStorage:', err)
-      }
-    },
-    [weekKey, todayDate]
-  )
+  // Listen to data changes
+  useEffect(() => {
+    const onDataChanged = () => {
+      loadWeeklyTasks()
+    }
+    window.addEventListener('app:data-changed' as any, onDataChanged)
+    return () => {
+      window.removeEventListener('app:data-changed' as any, onDataChanged)
+    }
+  }, [loadWeeklyTasks])
 
   // 작업 완료 토글
-  const handleToggleTask = (taskId: string) => {
-    if (!weekKey) return
+  const handleToggleTask = async (taskId: string) => {
+    const task = tasks.find((t) => t.id === taskId)
+    if (!task) return
 
     try {
-      const weeklyPlan: WeeklyPlan = getWeeklyPlan()
-      if (!weeklyPlan.weeks) {
-        weeklyPlan.weeks = {}
-      }
-
-      const currentWeekTasks = weeklyPlan.weeks[weekKey]?.tasks || []
-      const updatedWeekTasks = currentWeekTasks.map((task) =>
-        task.id === taskId
-          ? { ...task, status: (task.status === 'todo' ? 'done' : 'todo') as 'todo' | 'done' }
-          : task
-      )
-
-      weeklyPlan.weeks[weekKey] = { tasks: updatedWeekTasks }
-      setWeeklyPlan(weeklyPlan)
-
-      // 오늘 작업만 다시 필터링하여 상태 업데이트
-      const todayTasks = updatedWeekTasks.filter(
-        (task) => task.pickedDate === todayDate
-      ) as WeeklyTask[]
-      setTasks(todayTasks)
+      await updateWeeklyTask(taskId, {
+        status: task.status === 'todo' ? 'done' : 'todo',
+      })
+      await loadWeeklyTasks()
     } catch (err) {
       console.error('Failed to toggle task:', err)
+      alert('작업 상태 변경에 실패했습니다: ' + (err as any)?.message)
     }
   }
 
@@ -321,35 +247,16 @@ function TodayPageContent() {
     }
   }
 
-  // 오늘에서 제거 (pickedDate 제거)
-  const handleRemoveFromToday = (taskId: string) => {
-    if (!weekKey) return
-
+  // 오늘에서 제거 (picked_for_today = false)
+  const handleRemoveFromToday = async (taskId: string) => {
     try {
-      const weeklyPlan: WeeklyPlan = getWeeklyPlan()
-      if (!weeklyPlan.weeks) {
-        weeklyPlan.weeks = {}
-      }
-
-      const currentWeekTasks = weeklyPlan.weeks[weekKey]?.tasks || []
-      const updatedWeekTasks = currentWeekTasks.map((task) => {
-        if (task.id === taskId) {
-          const { pickedDate, ...rest } = task
-          return { ...rest, pickedDate: undefined } as WeeklyTask
-        }
-        return task
+      await updateWeeklyTask(taskId, {
+        picked_for_today: false,
       })
-
-      weeklyPlan.weeks[weekKey] = { tasks: updatedWeekTasks }
-      setWeeklyPlan(weeklyPlan)
-
-      // 오늘 작업만 다시 필터링하여 상태 업데이트
-      const todayTasks = updatedWeekTasks.filter(
-        (task) => task.pickedDate === todayDate
-      )
-      setTasks(todayTasks)
+      await loadWeeklyTasks()
     } catch (err) {
       console.error('Failed to remove task from today:', err)
+      alert('오늘에서 제거에 실패했습니다: ' + (err as any)?.message)
     }
   }
 
@@ -373,11 +280,6 @@ function TodayPageContent() {
     tasksByProject[projectId].sort((a, b) => a.order - b.order)
   })
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut()
-    router.replace('/')
-  }
-
   if (loading) {
     return (
       <div style={{ padding: '2rem', textAlign: 'center' }}>
@@ -397,26 +299,11 @@ function TodayPageContent() {
 
   return (
     <div style={{ padding: '2rem', maxWidth: '1200px', margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-        <div>
-          <h1 style={{ margin: 0 }}>{t.pages.todayTitle}</h1>
-          <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.875rem', color: '#666' }}>
-            {todayDate || getDateKey(new Date())}
-          </p>
-        </div>
-        <button
-          onClick={handleLogout}
-          style={{
-            padding: '0.5rem 1rem',
-            backgroundColor: '#dc3545',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-          }}
-        >
-          {t.nav.logout}
-        </button>
+      <div style={{ marginBottom: '1.5rem' }}>
+        <h1 style={{ margin: 0 }}>{t.pages.todayTitle}</h1>
+        <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.875rem', color: '#666' }}>
+          {todayDate || getDateKey(new Date())}
+        </p>
       </div>
 
       {/* Routines 섹션 */}
@@ -764,6 +651,18 @@ function TodayPageContent() {
           </div>
         </div>
       )}
+
+      {/* Step Navigation */}
+      <StepNav
+        prev={{
+          href: '/weekly',
+          label: '← 이전 단계(위클리)',
+        }}
+        next={{
+          href: '/review',
+          label: '다음 단계(리뷰) →',
+        }}
+      />
     </div>
   )
 }

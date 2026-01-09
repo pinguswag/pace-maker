@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { supabase } from '@/lib/supabase/client'
 import { RequireAuth } from '@/components/auth/RequireAuth'
+import { StepNav } from '@/components/StepNav'
 import { useAuth } from '@/components/auth/AuthProvider'
 
 interface MandaratBoard {
@@ -66,6 +67,8 @@ function MandaratPageContent() {
   const [setupRequired, setSetupRequired] = useState(false)
   const [timeoutError, setTimeoutError] = useState(false)
   const initializedRef = useRef(false)
+  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const saveVersionRef = useRef(0)
 
   // 차트 셀 매핑 생성 (9x9)
   const getChartCell = (row: number, col: number): ChartCell => {
@@ -448,14 +451,27 @@ function MandaratPageContent() {
     }
   }, [session?.user?.id])
 
-  // 저장
-  const handleSave = async () => {
+  // 컴포넌트 언마운트 시 타이머 정리
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  // 자동 저장 함수 (레이스 컨디션 방지를 위한 버전 체크 포함)
+  const performSave = useCallback(async (version: number) => {
     if (!board || !session?.user?.id) return
+
+    // 이전 버전의 저장 요청이면 무시
+    if (version !== saveVersionRef.current) {
+      return
+    }
 
     try {
       setSaving(true)
       setError(null)
-      setSavedMessage(false)
 
       // 1. Board 업데이트
       const { error: boardError } = await supabase
@@ -464,8 +480,10 @@ function MandaratPageContent() {
         .eq('id', board.id)
 
       if (boardError) {
-        setError(boardError.message)
-        setSaving(false)
+        // 버전이 변경되지 않았을 때만 에러 표시
+        if (version === saveVersionRef.current) {
+          setError(boardError.message)
+        }
         return
       }
 
@@ -483,8 +501,9 @@ function MandaratPageContent() {
         })
 
       if (strategiesError) {
-        setError(strategiesError.message)
-        setSaving(false)
+        if (version === saveVersionRef.current) {
+          setError(strategiesError.message)
+        }
         return
       }
 
@@ -514,19 +533,52 @@ function MandaratPageContent() {
         })
 
       if (actionsError) {
-        setError(actionsError.message)
-        setSaving(false)
+        if (version === saveVersionRef.current) {
+          setError(actionsError.message)
+        }
         return
       }
 
-      setSavedMessage(true)
-      setTimeout(() => setSavedMessage(false), 2000)
+      // 저장 성공 시 버전이 여전히 같으면 성공 메시지 표시
+      if (version === saveVersionRef.current) {
+        setSavedMessage(true)
+        setTimeout(() => setSavedMessage(false), 2000)
+      }
     } catch (err) {
-      setError('저장 중 오류가 발생했습니다.')
+      if (version === saveVersionRef.current) {
+        setError('저장 중 오류가 발생했습니다.')
+      }
     } finally {
-      setSaving(false)
+      // 버전이 여전히 같을 때만 saving 상태 해제
+      if (version === saveVersionRef.current) {
+        setSaving(false)
+      }
     }
-  }
+  }, [board, session?.user?.id, yearlyGoal, strategies, actions])
+
+  // debounce된 자동 저장 트리거
+  const triggerAutoSave = useCallback((immediate = false) => {
+    // 기존 타이머 취소
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current)
+      saveTimeoutRef.current = null
+    }
+
+    if (immediate) {
+      // 즉시 저장 (blur 시)
+      saveVersionRef.current += 1
+      performSave(saveVersionRef.current)
+    } else {
+      // debounce 저장 (300ms)
+      saveVersionRef.current += 1
+      const currentVersion = saveVersionRef.current
+      saveTimeoutRef.current = setTimeout(() => {
+        if (currentVersion === saveVersionRef.current) {
+          performSave(currentVersion)
+        }
+      }, 500)
+    }
+  }, [performSave])
 
   // 재시도
   const handleRetry = () => {
@@ -550,6 +602,8 @@ function MandaratPageContent() {
     const newStrategies = [...strategies]
     newStrategies[index] = value
     setStrategies(newStrategies)
+    // 자동 저장 트리거
+    triggerAutoSave()
   }
 
   // 액션 업데이트
@@ -557,6 +611,8 @@ function MandaratPageContent() {
     const newActions = actions.map((row) => [...row])
     newActions[strategyIndex][actionIndex] = value
     setActions(newActions)
+    // 자동 저장 트리거
+    triggerAutoSave()
   }
 
   // 셀 클릭 핸들러 (셀 내부 편집 모드)
@@ -568,19 +624,51 @@ function MandaratPageContent() {
     setSelectedCell({ row: cell.row, col: cell.col })
   }
 
-  // 셀 편집 저장
-  const handleCellSave = (newValue: string) => {
+  // 셀 편집 저장 (trim하지 않고 원본 값 저장하여 줄바꿈 유지)
+  const handleCellSave = (newValue: string, immediate = false) => {
     if (!editingCell) return
 
     const { cell } = editingCell
-    const trimmedValue = newValue.trim()
+    // trim하지 않고 원본 값 저장 (줄바꿈 유지)
 
     if (cell.type === 'yearly-goal') {
-      setYearlyGoal(trimmedValue)
+      setYearlyGoal(newValue)
+      // yearlyGoal 변경 후 자동 저장 (setState는 비동기이므로 약간의 지연 후 저장)
+      // 새로운 값을 직접 사용하여 저장
+      setTimeout(() => {
+        if (board && session?.user?.id) {
+          saveVersionRef.current += 1
+          const version = saveVersionRef.current
+          setSaving(true)
+          // yearlyGoal만 업데이트
+          supabase
+            .from('mandarat_boards')
+            .update({ yearly_goal: newValue })
+            .eq('id', board.id)
+            .then(({ error }) => {
+              if (error && version === saveVersionRef.current) {
+                setError(error.message)
+                setSaving(false)
+              } else if (version === saveVersionRef.current) {
+                setSavedMessage(true)
+                setTimeout(() => setSavedMessage(false), 2000)
+                setSaving(false)
+              }
+            })
+        }
+      }, immediate ? 0 : 500)
     } else if (cell.type === 'strategy' && cell.strategyIndex !== undefined) {
-      updateStrategy(cell.strategyIndex, trimmedValue)
+      updateStrategy(cell.strategyIndex, newValue)
+      if (immediate) {
+        // 즉시 저장이 필요한 경우 (blur)
+        setTimeout(() => triggerAutoSave(true), 0)
+      }
     } else if (cell.type === 'action' && cell.strategyIndex !== undefined && cell.actionIndex !== undefined) {
-      updateAction(cell.strategyIndex, cell.actionIndex, trimmedValue)
+      updateAction(cell.strategyIndex, cell.actionIndex, newValue)
+      if (immediate) {
+        // 즉시 저장이 필요한 경우 (blur)
+        setTimeout(() => triggerAutoSave(true), 0)
+      }
     }
 
     setEditingCell(null)
@@ -652,7 +740,12 @@ function MandaratPageContent() {
 
   return (
     <div style={{ padding: '2rem', maxWidth: '1400px', margin: '0 auto' }}>
-      <h1 style={{ marginBottom: '2rem' }}>Mandarat</h1>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
+        <h1 style={{ margin: 0 }}>Mandarat</h1>
+        <div style={{ fontSize: '0.875rem', color: '#666' }}>
+          {saving ? '저장 중...' : savedMessage ? '저장됨' : ''}
+        </div>
+      </div>
 
       {/* 9x9 Chart */}
       <div style={{ marginBottom: '3rem' }}>
@@ -752,15 +845,19 @@ function MandaratPageContent() {
                   {isEditing ? (
                     <textarea
                       value={editingCell.value}
-                      onChange={(e) => setEditingCell({ ...editingCell, value: e.target.value })}
-                      onBlur={() => handleCellSave(editingCell.value)}
+                      onChange={(e) => {
+                        setEditingCell({ ...editingCell, value: e.target.value })
+                        // onChange 시에는 debounce 저장
+                        // 실제 저장은 handleCellSave에서 처리
+                      }}
+                      onBlur={() => handleCellSave(editingCell.value, true)}
                       onKeyDown={(e) => {
                         if ((e.key === 'Enter' && (e.metaKey || e.ctrlKey)) || e.key === 'Escape') {
                           e.preventDefault()
                           if (e.key === 'Escape') {
                             handleCellCancel()
                           } else {
-                            handleCellSave(editingCell.value)
+                            handleCellSave(editingCell.value, true)
                           }
                         }
                         // Enter alone allows newline (default behavior)
@@ -843,39 +940,15 @@ function MandaratPageContent() {
         </div>
       )}
 
-      {/* Saved Message */}
-      {savedMessage && (
-        <div
-          style={{
-            color: '#155724',
-            marginBottom: '1rem',
-            padding: '0.75rem',
-            backgroundColor: '#d4edda',
-            borderRadius: '4px',
-            fontSize: '0.875rem',
-          }}
-        >
-          저장되었습니다.
-        </div>
-      )}
-
-      {/* Save Button */}
-      <button
-        onClick={handleSave}
-        disabled={saving}
-        style={{
-          padding: '0.75rem 1.5rem',
-          backgroundColor: saving ? '#e0e0e0' : '#0070f3',
-          color: 'white',
-          border: 'none',
-          borderRadius: '4px',
-          cursor: saving ? 'not-allowed' : 'pointer',
-          fontSize: '1rem',
-          fontWeight: '500',
+      {/* Step Navigation */}
+      <StepNav
+        next={{
+          href: '/projects/new',
+          label: '다음 단계(프로젝트 생성) →',
+          disabled: !yearlyGoal?.trim() || !strategies.some(s => s?.trim()) || !actions.some(row => row?.some(a => a?.trim())),
+          hint: '만다라트를 먼저 작성해 주세요.',
         }}
-      >
-        {saving ? '저장 중...' : '저장'}
-      </button>
+      />
     </div>
   )
 }

@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { RequireAuth } from '@/components/auth/RequireAuth'
 import { t } from '@/lib/uiText/ko'
 import { getRoutines as getStoredRoutines, setRoutines as saveRoutines } from '@/lib/mockStore'
+import { emitDataChanged } from '@/lib/emitDataChanged'
 
 // Routine 타입 정의
 interface Routine {
@@ -49,6 +50,7 @@ function RoutinesPageContent() {
       const data: RoutinesData = { routines: updatedRoutines }
       saveRoutines(data)
       setRoutines(updatedRoutines)
+      emitDataChanged() // Notify other tabs/components
     } catch (err) {
       console.error('Failed to save routines to localStorage:', err)
     }
